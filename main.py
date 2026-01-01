@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import Dict
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,7 +9,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.datasets import make_classification
-from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.model_selection import (
+    train_test_split,
+    StratifiedKFold,
+    GridSearchCV,
+    cross_val_score
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
@@ -24,6 +29,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 
 
+# =========================
+# Configuration
+# =========================
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
 CV_SPLITS = 5
@@ -33,12 +41,18 @@ warnings.filterwarnings("ignore")
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 
+# =========================
+# Data Generation
+# =========================
 def create_dataset() -> pd.DataFrame:
-    logging.info("Generating synthetic classification dataset")
+    """
+    Generates a synthetic binary classification dataset.
+    """
+    logging.info("Generating synthetic dataset")
 
     X, y = make_classification(
         n_samples=3000,
@@ -55,61 +69,101 @@ def create_dataset() -> pd.DataFrame:
     return df
 
 
-
-def split_data(df: pd.DataFrame):
+# =========================
+# Train-Test Split
+# =========================
+def split_data(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """
+    Splits dataset into stratified train and test sets.
+    """
     X = df.drop("target", axis=1)
     y = df["target"]
 
     return train_test_split(
-        X, y,
+        X,
+        y,
         test_size=TEST_SIZE,
         random_state=RANDOM_STATE,
         stratify=y
     )
 
 
+# =========================
+# Model Pipelines
+# =========================
 def get_pipelines() -> Dict[str, Pipeline]:
+    """
+    Returns ML pipelines for different models.
+    """
     return {
-        "logistic_regression": Pipeline([
+        "Logistic Regression": Pipeline([
             ("scaler", StandardScaler()),
             ("model", LogisticRegression(max_iter=2000))
         ]),
 
-        "svm": Pipeline([
+        "SVM": Pipeline([
             ("scaler", StandardScaler()),
             ("model", SVC(probability=True))
         ]),
 
-        "random_forest": Pipeline([
+        "Random Forest": Pipeline([
             ("model", RandomForestClassifier(
-                random_state=RANDOM_STATE,
-                n_estimators=200
+                n_estimators=200,
+                random_state=RANDOM_STATE
             ))
         ])
     }
 
 
-
-def evaluate_models(pipelines, X_train, y_train):
-    cv = StratifiedKFold(n_splits=CV_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+# =========================
+# Model Evaluation (CV)
+# =========================
+def evaluate_models(
+    pipelines: Dict[str, Pipeline],
+    X_train: pd.DataFrame,
+    y_train: pd.Series
+) -> Dict[str, float]:
+    """
+    Performs cross-validation on all models.
+    """
+    cv = StratifiedKFold(
+        n_splits=CV_SPLITS,
+        shuffle=True,
+        random_state=RANDOM_STATE
+    )
 
     scores = {}
     for name, pipeline in pipelines.items():
-        logging.info(f"Cross-validating {name}")
-        cv_scores = []
-        for train_idx, val_idx in cv.split(X_train, y_train):
-            pipeline.fit(X_train.iloc[train_idx], y_train.iloc[train_idx])
-            preds = pipeline.predict(X_train.iloc[val_idx])
-            cv_scores.append(accuracy_score(y_train.iloc[val_idx], preds))
+        logging.info(f"Evaluating {name} with cross-validation")
 
-        scores[name] = np.mean(cv_scores)
+        cv_scores = cross_val_score(
+            pipeline,
+            X_train,
+            y_train,
+            scoring="accuracy",
+            cv=cv,
+            n_jobs=-1
+        )
+
+        scores[name] = cv_scores.mean()
         logging.info(f"{name} CV Accuracy: {scores[name]:.4f}")
 
     return scores
 
 
-def tune_random_forest(X_train, y_train):
-    logging.info("Starting hyperparameter tuning for Random Forest")
+# =========================
+# Hyperparameter Tuning
+# =========================
+def tune_random_forest(
+    X_train: pd.DataFrame,
+    y_train: pd.Series
+) -> Pipeline:
+    """
+    Performs GridSearchCV for Random Forest.
+    """
+    logging.info("Starting Random Forest hyperparameter tuning")
 
     pipeline = Pipeline([
         ("model", RandomForestClassifier(random_state=RANDOM_STATE))
@@ -122,11 +176,12 @@ def tune_random_forest(X_train, y_train):
     }
 
     grid = GridSearchCV(
-        pipeline,
-        param_grid,
+        estimator=pipeline,
+        param_grid=param_grid,
         scoring="accuracy",
         cv=CV_SPLITS,
-        n_jobs=-1
+        n_jobs=-1,
+        verbose=1
     )
 
     grid.fit(X_train, y_train)
@@ -137,13 +192,24 @@ def tune_random_forest(X_train, y_train):
     return grid.best_estimator_
 
 
-
-def evaluate_model(model, X_test, y_test):
+# =========================
+# Final Evaluation
+# =========================
+def evaluate_final_model(
+    model: Pipeline,
+    X_test: pd.DataFrame,
+    y_test: pd.Series
+) -> None:
+    """
+    Evaluates the trained model on test data.
+    """
     y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
+
+    if hasattr(model, "predict_proba"):
+        y_proba = model.predict_proba(X_test)[:, 1]
+        logging.info(f"ROC-AUC Score: {roc_auc_score(y_test, y_proba):.4f}")
 
     logging.info(f"Test Accuracy: {accuracy_score(y_test, y_pred):.4f}")
-    logging.info(f"ROC-AUC Score: {roc_auc_score(y_test, y_proba):.4f}")
 
     print("\nClassification Report:\n")
     print(classification_report(y_test, y_pred))
@@ -159,14 +225,22 @@ def evaluate_model(model, X_test, y_test):
     plt.show()
 
 
-
-def save_model(model):
+# =========================
+# Save Model
+# =========================
+def save_model(model: Pipeline) -> None:
+    """
+    Saves trained model to disk.
+    """
     joblib.dump(model, MODEL_PATH)
-    logging.info(f"Model saved to {MODEL_PATH}")
+    logging.info(f"Model saved at: {MODEL_PATH}")
 
 
-def main():
-    logging.info("Pipeline started")
+# =========================
+# Main Pipeline
+# =========================
+def main() -> None:
+    logging.info("ML pipeline started")
 
     df = create_dataset()
     X_train, X_test, y_train, y_test = split_data(df)
@@ -175,11 +249,11 @@ def main():
     evaluate_models(pipelines, X_train, y_train)
 
     best_model = tune_random_forest(X_train, y_train)
-    evaluate_model(best_model, X_test, y_test)
+    evaluate_final_model(best_model, X_test, y_test)
 
     save_model(best_model)
 
-    logging.info("Pipeline completed successfully")
+    logging.info("ML pipeline completed successfully")
 
 
 if __name__ == "__main__":
